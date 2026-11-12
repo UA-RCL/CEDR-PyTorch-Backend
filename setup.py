@@ -11,7 +11,7 @@ setup(
     ext_modules=[cpp_extension.CppExtension(
         'cedr_backend',
         ['cedr_backend.cpp', 'cedr_ops.cpp'],
-        include_dirs=[cpp_extension.include_paths(), 'include/cedr_ops.h'],
+        include_dirs=[*cpp_extension.include_paths(), 'include'],
         extra_compile_args = ["-fopenmp",
                               f"-DTORCH_MAJOR_VERSION={major}",
                               f"-DTORCH_MINOR_VERSION={minor}",
