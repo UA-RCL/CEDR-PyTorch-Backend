@@ -93,40 +93,6 @@ Tensor cedr_linear(const Tensor& input, const Tensor& weight, const c10::optiona
   return output_tensor;
 }
 
-Tensor cedr_conv1d(
-    const Tensor& input,
-    const Tensor& weight,
-    const c10::optional<Tensor>& bias_opt,
-    IntArrayRef stride,
-    IntArrayRef padding,
-    IntArrayRef dilation,
-    int64_t groups){
-
-    const Tensor& bias = bias_opt.has_value() ? *bias_opt : Tensor();
-    at::Tensor output_tensor = at::zeros(
-        {input.size(0), weight.size(0), input.size(2)},
-        input.options());
-
-    // Apply bias if defined
-    if (bias.defined() && bias.numel() > 0) {
-        auto* out_data = output_tensor.data_ptr<float>();
-        const auto* bias_data = bias.data_ptr<float>();
-        for (int i = 0; i < bias.numel(); ++i) {
-            for (int j = 0; j < input.size(2); ++j) {
-                out_data[i * input.size(2) + j] = bias_data[i];
-            }
-        }
-    }
-
-    _cedr_conv1D_FFT(
-        input.data_ptr<float>(), weight.data_ptr<float>(),
-        output_tensor.data_ptr<float>(),
-        input.size(2),
-        weight.size(2), weight.size(0), input.size(1));
-
-    return output_tensor;
-}
-
 } 
 } 
 
@@ -136,10 +102,6 @@ TORCH_LIBRARY_IMPL(aten, CPU, m) {
 
 TORCH_LIBRARY_IMPL(aten, CPU, m) {
     m.impl("linear", at::native::cedr_linear); 
-}
-
-TORCH_LIBRARY_IMPL(aten, CPU, m) {
-    m.impl("conv1d", at::native::cedr_conv1d); 
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
