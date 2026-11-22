@@ -45,8 +45,10 @@ void __attribute__((constructor)) setup_APIs_convolution(void) {
 
 }
 
-void cedr_conv2D(float *in, float  *filter, float *out, int height, int width, int kernel_size, int filter_number, int in_channel){
-  dash_re_flt_type *conv_output = (dash_re_flt_type *) malloc (sizeof (dash_re_flt_type) * filter_number * in_channel * height * width);
+void cedr_conv2D(float *in, float  *filter, float *out, int batch, int height, int width, int kernel_size, int filter_number, int in_channel){
+  // One CONV_2D per (sample, input channel) pair, all issued before waiting
+  const int n_convs = batch * in_channel;
+  dash_re_flt_type *conv_output = (dash_re_flt_type *) malloc (sizeof (dash_re_flt_type) * n_convs * height * width);
 
   for(int i = 0; i < filter_number; i++){
     // Call non-blocking CONV_2D
@@ -54,30 +56,33 @@ void cedr_conv2D(float *in, float  *filter, float *out, int height, int width, i
     dash_re_flt_type **conv_in_0; // height x width
     dash_re_flt_type **conv_out_0; // height x width
     dash_re_flt_type **conv_filter_0; // kernel_size x kernel_size
-    conv_in_0 = ((dash_re_flt_type**) calloc(in_channel, sizeof(dash_re_flt_type*)));
-    conv_out_0 = ((dash_re_flt_type**) calloc(in_channel, sizeof(dash_re_flt_type*)));
-    conv_filter_0 = ((dash_re_flt_type**) calloc(in_channel, sizeof(dash_re_flt_type*)));
+    conv_in_0 = ((dash_re_flt_type**) calloc(n_convs, sizeof(dash_re_flt_type*)));
+    conv_out_0 = ((dash_re_flt_type**) calloc(n_convs, sizeof(dash_re_flt_type*)));
+    conv_filter_0 = ((dash_re_flt_type**) calloc(n_convs, sizeof(dash_re_flt_type*)));
 
 
     pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     uint32_t completion_ctr = 0;
-    uint32_t completion = in_channel;
+    uint32_t completion = n_convs;
     cedr_barrier_t barrier = {.cond = &cond, .mutex = &mutex, .completion_ctr = &completion_ctr, .completion = &completion};
 
-    // Set Input and Output pointers
-    for(int j = 0; j < in_channel; j++){
-      conv_in_0[j] = (dash_re_flt_type *) &(in[j * height * width]);
-      conv_out_0[j] = (dash_re_flt_type *) &(conv_output[j * height * width]);
-      conv_filter_0[j] = (dash_re_flt_type *) &(filter[((i * in_channel + j) * kernel_size * kernel_size)]);
+    // Set Input and Output pointers; input is [batch][in_channel][height][width]
+    for(int n = 0; n < batch; n++){
+      for(int j = 0; j < in_channel; j++){
+        const int idx = n * in_channel + j;
+        conv_in_0[idx] = (dash_re_flt_type *) &(in[idx * height * width]);
+        conv_out_0[idx] = (dash_re_flt_type *) &(conv_output[idx * height * width]);
+        conv_filter_0[idx] = (dash_re_flt_type *) &(filter[((i * in_channel + j) * kernel_size * kernel_size)]);
+      }
     }
     // Call non-blocking CONV_2D
-    for(int j = 0; j < in_channel; j++){
-      DASH_CONV_2D_flt_nb(&conv_in_0[j], &height, &width, &conv_filter_0[j], &kernel_size, &conv_out_0[j], &barrier);
+    for(int idx = 0; idx < n_convs; idx++){
+      DASH_CONV_2D_flt_nb(&conv_in_0[idx], &height, &width, &conv_filter_0[idx], &kernel_size, &conv_out_0[idx], &barrier);
     }
     //Wait for all CONV_2D's to complete
     pthread_mutex_lock(barrier.mutex);
-    if (completion_ctr != in_channel) {
+    if (completion_ctr != n_convs) {
       pthread_cond_wait(barrier.cond, barrier.mutex);
     }
     pthread_mutex_unlock(barrier.mutex);
@@ -85,9 +90,13 @@ void cedr_conv2D(float *in, float  *filter, float *out, int height, int width, i
     free(conv_out_0);
     free(conv_filter_0);
 
-    for(int j = 0; j < in_channel; j++){
-			DASH_ZIP_flt((dash_cmplx_flt_type *)&conv_output[j * height * width], (dash_cmplx_flt_type *)&(out[(i * height * width)]), (dash_cmplx_flt_type *)&(out[(i * height * width)]), height * width / 2, ZIP_ADD);
-		}
+    // Sum input channels into output channel i of each sample; output is [batch][filter_number][height][width]
+    for(int n = 0; n < batch; n++){
+      float *out_plane = &(out[((n * filter_number + i) * height * width)]);
+      for(int j = 0; j < in_channel; j++){
+        DASH_ZIP_flt((dash_cmplx_flt_type *)&conv_output[(n * in_channel + j) * height * width], (dash_cmplx_flt_type *)out_plane, (dash_cmplx_flt_type *)out_plane, height * width / 2, ZIP_ADD);
+      }
+    }
   }
 
   

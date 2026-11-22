@@ -35,13 +35,16 @@ Tensor cedr_conv2d(
             {input.size(0), weight.size(0), input.size(2), input.size(3)},
             input.options());
 
-        // Apply bias if defined
+        // Apply bias if defined, for every sample in the batch
         if (bias.defined() && bias.numel() > 0) {
             auto* out_data = output_tensor.data_ptr<float>();
             const auto* bias_data = bias.data_ptr<float>();
-            for (int i = 0; i < bias.numel(); ++i) {
-                for (int j = 0; j < input.size(2) * input.size(3); ++j) {
-                    out_data[i * input.size(2) * input.size(3) + j] = bias_data[i];
+            const int64_t plane = input.size(2) * input.size(3);
+            for (int64_t n = 0; n < input.size(0); ++n) {
+                for (int i = 0; i < bias.numel(); ++i) {
+                    for (int j = 0; j < plane; ++j) {
+                        out_data[(n * bias.numel() + i) * plane + j] = bias_data[i];
+                    }
                 }
             }
         }
@@ -50,7 +53,7 @@ Tensor cedr_conv2d(
         cedr_conv2D(
             input.data_ptr<float>(), weight.data_ptr<float>(),
             output_tensor.data_ptr<float>(),
-            input.size(2), input.size(3),
+            input.size(0), input.size(2), input.size(3),
             weight.size(2), weight.size(0), input.size(1));
         return output_tensor;
     }
@@ -76,7 +79,12 @@ Tensor cedr_linear(const Tensor& input, const Tensor& weight, const c10::optiona
     : c10::MaybeOwned<Tensor>::owned(c10::in_place);
 #endif
 
-  at::Tensor output_tensor = at::zeros({1, weight.size(0)});
+  const int64_t in_features = weight.size(1);
+  const int64_t out_features = weight.size(0);
+  at::Tensor input_2d = input.reshape({-1, in_features}).contiguous();
+  const int64_t rows = input_2d.size(0);
+
+  at::Tensor output_tensor = at::zeros({rows, out_features}, input.options());
 
   bool bias_flag = false;
   if (bias->defined()) {
@@ -84,13 +92,16 @@ Tensor cedr_linear(const Tensor& input, const Tensor& weight, const c10::optiona
   }
 
   if (bias_flag){
-    _cedr_linear((float*)input.flatten().data_ptr(), (float*) weight.flatten().data_ptr(), (float*) ((Tensor)*bias).flatten().data_ptr(), (float*)output_tensor.flatten().data_ptr(), 1, input.flatten().size(0), weight.size(0), bias_flag);
+    _cedr_linear((float*)input_2d.data_ptr(), (float*) weight.flatten().data_ptr(), (float*) ((Tensor)*bias).flatten().data_ptr(), (float*)output_tensor.data_ptr(), rows, in_features, out_features, bias_flag);
   }else{
     float* empty_bias;
-    _cedr_linear((float*)input.flatten().data_ptr(), (float*) weight.flatten().data_ptr(), empty_bias, (float*)output_tensor.flatten().data_ptr(), 1, input.flatten().size(0), weight.size(0), bias_flag);
-  
+    _cedr_linear((float*)input_2d.data_ptr(), (float*) weight.flatten().data_ptr(), empty_bias, (float*)output_tensor.data_ptr(), rows, in_features, out_features, bias_flag);
+
   }
-  return output_tensor;
+
+  std::vector<int64_t> out_sizes = input.sizes().vec();
+  out_sizes.back() = out_features;
+  return output_tensor.view(out_sizes);
 }
 
 } 
