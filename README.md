@@ -102,6 +102,66 @@ tensor([[ 0.0238,  0.0264,  0.0252,  0.0656,  0.0072, -0.0572,  0.0727, -0.0219,
           0.0348,  0.0464]])
 ```
 
+# Adding a New Operation
+
+Adding an operation has two parts: an API call in CEDR that does the work, and a wrapper in this backend that routes the PyTorch operator to it. The steps below use ReLU as an example.
+
+## 1. Add the API call to CEDR
+
+Follow the CEDR tutorial: [Introducing a New API Call](https://github.com/UA-RCL/CEDR/blob/tutorial/CEDR_tutorial.md#6-introducing-a-new-api-call). This example assumes the new API call has the following signature:
+
+```c
+void DASH_RELU_flt(dash_re_flt_type* input, dash_re_flt_type* output, size_t size);
+```
+
+## 2. Declare the API call in this backend
+
+Add the same signature to [`include/dash.h`](include/dash.h), inside the `extern "C"` block:
+
+```c
+void DASH_RELU_flt(dash_re_flt_type* input, dash_re_flt_type* output, size_t size);
+```
+
+## 3. Route the PyTorch operator to it
+
+In [`cedr_backend.cpp`](cedr_backend.cpp), add a wrapper inside `namespace at { namespace native {` that takes the same arguments as the PyTorch operator (`aten::relu(Tensor self) -> Tensor`) and calls the new API. Inputs that CEDR doesn't handle should fall back to PyTorch. Don't call `at::relu` for the fallback: it would dispatch back to this wrapper and recurse.
+
+If the data has to be reshaped before or after the CEDR call, put that code in a helper in [`cedr_ops.cpp`](cedr_ops.cpp) and declare it in [`include/cedr_ops.h`](include/cedr_ops.h). `conv2d` and `linear` work this way. ReLU needs no reshaping, so the wrapper calls CEDR directly.
+
+```cpp
+Tensor cedr_relu(const Tensor& self) {
+    // Fall back to PyTorch for non-float32 inputs
+    if (self.scalar_type() != at::kFloat) {
+        return at::clamp_min(self, 0);
+    }
+
+    Tensor input = self.contiguous();
+    Tensor output = at::empty_like(input);
+    DASH_RELU_flt((dash_re_flt_type *)input.data_ptr<float>(), (dash_re_flt_type *)output.data_ptr<float>(), input.numel());
+    return output;
+}
+```
+
+Then register it at the bottom of the file, next to `conv2d` and `linear`:
+
+```cpp
+TORCH_LIBRARY_IMPL(aten, CPU, m) {
+    m.impl("relu", at::native::cedr_relu);
+}
+```
+
+The operator name and its signature are listed in PyTorch's [`native_functions.yaml`](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/native_functions.yaml). This registration covers `torch.relu`, `F.relu` and `nn.ReLU()`. The in-place variants (`inplace=True`, `relu_`) are a separate operator, `relu_`.
+
+## 4. Rebuild and run
+
+Rebuild CEDR with the new API call, then reinstall this backend in your environment:
+
+```bash
+pip3 install --no-build-isolation .
+```
+
+Then run your model with CEDR as described in [Running With CEDR](#running-with-cedr).
+
 # Citation
 
 If you use this work, please cite:
